@@ -21,6 +21,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -34,9 +35,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -49,8 +54,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -92,8 +101,16 @@ fun fileName(context: Context, uri: Uri): String {
     } ?: "Трек"
 }
 
+// "Исполнитель - Название.mp3" -> (исполнитель, название)
+fun guessFromName(name: String): Pair<String?, String> {
+    val base = name.substringBeforeLast('.').replace('_', ' ').trim()
+    val parts = base.split(" - ", limit = 2)
+    return if (parts.size == 2) Pair(parts[0].trim(), parts[1].trim()) else Pair(null, base)
+}
+
 fun loadSong(context: Context, uri: Uri): Song {
     val r = MediaMetadataRetriever()
+    val guess = guessFromName(fileName(context, uri))
     return try {
         r.setDataSource(context, uri)
         val title = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
@@ -104,13 +121,13 @@ fun loadSong(context: Context, uri: Uri): Song {
         val cover = pic?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
         Song(
             uri,
-            title ?: fileName(context, uri).substringBeforeLast('.'),
-            artist ?: "Неизвестный исполнитель",
+            if (title.isNullOrBlank()) guess.second else title,
+            if (artist.isNullOrBlank()) (guess.first ?: "Неизвестный исполнитель") else artist,
             cover,
             (durMs / 1000).toInt()
         )
     } catch (e: Exception) {
-        Song(uri, fileName(context, uri).substringBeforeLast('.'), "Неизвестный исполнитель", null, 0)
+        Song(uri, guess.second, guess.first ?: "Неизвестный исполнитель", null, 0)
     } finally {
         r.release()
     }
@@ -143,6 +160,57 @@ fun shiftHue(c: Color, deg: Float): Color {
         hsv[1].coerceIn(0.4f, 1f),
         hsv[2].coerceIn(0.35f, 0.7f)
     )
+}
+
+// 0 - назад, 1 - играть, 2 - пауза, 3 - вперёд
+@Composable
+fun TransportIcon(kind: Int) {
+    Canvas(Modifier.size(24.dp)) {
+        val w = size.width
+        val h = size.height
+        val white = Color.White
+        when (kind) {
+            0 -> {
+                drawRect(white, Offset(w * 0.15f, h * 0.2f), Size(w * 0.12f, h * 0.6f))
+                val p = Path().apply {
+                    moveTo(w * 0.85f, h * 0.2f)
+                    lineTo(w * 0.35f, h * 0.5f)
+                    lineTo(w * 0.85f, h * 0.8f)
+                    close()
+                }
+                drawPath(p, white)
+            }
+            1 -> {
+                val p = Path().apply {
+                    moveTo(w * 0.25f, h * 0.12f)
+                    lineTo(w * 0.9f, h * 0.5f)
+                    lineTo(w * 0.25f, h * 0.88f)
+                    close()
+                }
+                drawPath(p, white)
+            }
+            2 -> {
+                drawRoundRect(
+                    white, Offset(w * 0.2f, h * 0.15f),
+                    Size(w * 0.2f, h * 0.7f), CornerRadius(3f, 3f)
+                )
+                drawRoundRect(
+                    white, Offset(w * 0.6f, h * 0.15f),
+                    Size(w * 0.2f, h * 0.7f), CornerRadius(3f, 3f)
+                )
+            }
+            else -> {
+                drawRect(white, Offset(w * 0.73f, h * 0.2f), Size(w * 0.12f, h * 0.6f))
+                val p = Path().apply {
+                    moveTo(w * 0.15f, h * 0.2f)
+                    lineTo(w * 0.65f, h * 0.5f)
+                    lineTo(w * 0.15f, h * 0.8f)
+                    close()
+                }
+                drawPath(p, white)
+            }
+        }
+    }
 }
 
 @Composable
@@ -193,6 +261,7 @@ fun PlayerCard(
     onNext: () -> Unit,
     onSeek: (Float) -> Unit,
     onAdd: () -> Unit,
+    onSearch: () -> Unit,
     modifier: Modifier
 ) {
     val frac = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
@@ -222,12 +291,19 @@ fun PlayerCard(
                 )
             }
             Text(
+                "🔍",
+                fontSize = 16.sp,
+                modifier = Modifier
+                    .clickable { onSearch() }
+                    .padding(start = 8.dp, end = 4.dp)
+            )
+            Text(
                 "+",
                 color = Color.White,
                 fontSize = 26.sp,
                 modifier = Modifier
                     .clickable { onAdd() }
-                    .padding(start = 12.dp)
+                    .padding(start = 8.dp)
             )
         }
 
@@ -264,18 +340,15 @@ fun PlayerCard(
         ) {
             Text(fmt(position), color = Color.White.copy(alpha = 0.6f), fontSize = 10.sp)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "⏮", color = Color.White, fontSize = 22.sp,
-                    modifier = Modifier.clickable { onPrev() }.padding(horizontal = 10.dp)
-                )
-                Text(
-                    if (isPlaying) "⏸" else "▶", color = Color.White, fontSize = 24.sp,
-                    modifier = Modifier.clickable { onToggle() }.padding(horizontal = 10.dp)
-                )
-                Text(
-                    "⏭", color = Color.White, fontSize = 22.sp,
-                    modifier = Modifier.clickable { onNext() }.padding(horizontal = 10.dp)
-                )
+                Box(Modifier.clickable { onPrev() }.padding(horizontal = 12.dp, vertical = 2.dp)) {
+                    TransportIcon(0)
+                }
+                Box(Modifier.clickable { onToggle() }.padding(horizontal = 12.dp, vertical = 2.dp)) {
+                    TransportIcon(if (isPlaying) 2 else 1)
+                }
+                Box(Modifier.clickable { onNext() }.padding(horizontal = 12.dp, vertical = 2.dp)) {
+                    TransportIcon(3)
+                }
             }
             Text(fmt(duration), color = Color.White.copy(alpha = 0.6f), fontSize = 10.sp)
         }
@@ -303,10 +376,13 @@ fun PlayerApp() {
     }
     var lyrics by remember { mutableStateOf(listOf<LrcLine>()) }
     var status by remember { mutableStateOf("Добавь песню, и здесь появится текст") }
-    var slots by remember { mutableStateOf(listOf(WKind.CLOCK, WKind.VIS)) }
+    var matched by remember { mutableStateOf(listOf<WKind>()) }
     var bannerKind by remember { mutableStateOf(WKind.CLOCK) }
     var bannerVisible by remember { mutableStateOf(false) }
     var bannerTick by remember { mutableStateOf(0) }
+    var showSearch by remember { mutableStateOf(false) }
+    var searchText by remember { mutableStateOf("") }
+    var manualQuery by remember { mutableStateOf<String?>(null) }
 
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -398,14 +474,25 @@ fun PlayerApp() {
 
     LaunchedEffect(song?.uri) {
         lyrics = emptyList()
-        slots = listOf(WKind.CLOCK, WKind.VIS)
+        matched = emptyList()
+        manualQuery = null
         if (song != null) {
             status = "Ищу текст…"
             val r = withContext(Dispatchers.IO) {
                 fetchLyrics(song.title, song.artist, song.durationSec)
             }
             lyrics = r
-            status = if (r.isEmpty()) "Синхронный текст не найден" else ""
+            status = if (r.isEmpty()) "Текст не найден. Нажми 🔍 и введи название" else ""
+        }
+    }
+
+    LaunchedEffect(manualQuery) {
+        val q = manualQuery
+        if (q != null && q.isNotBlank()) {
+            status = "Ищу текст…"
+            val r = withContext(Dispatchers.IO) { fetchLyrics(q, "", 0) }
+            lyrics = r
+            status = if (r.isEmpty()) "Текст не найден" else ""
         }
     }
 
@@ -420,8 +507,8 @@ fun PlayerApp() {
     LaunchedEffect(current, lyrics) {
         if (current >= 0) {
             val found = detectWidgets(lyrics[current].text)
+            matched = found
             if (found.isNotEmpty()) {
-                slots = (found + listOf(WKind.VIS, WKind.CLOCK)).distinct().take(2)
                 bannerKind = found.first()
                 bannerTick += 1
             }
@@ -436,11 +523,45 @@ fun PlayerApp() {
         }
     }
 
+    // Если в строке нет подходящих слов, виджеты сами сменяются каждые 5 секунд
+    val neutral = listOf(
+        WKind.CLOCK, WKind.VIS, WKind.STOPWATCH, WKind.COMPASS, WKind.HEART, WKind.SPEED
+    )
+    val rot = (position / 5000).toInt()
+    val slot0 = matched.getOrNull(0) ?: neutral[(rot * 2) % neutral.size]
+    val slot1Raw = matched.getOrNull(1)
+        ?: if (matched.isNotEmpty()) WKind.VIS else neutral[(rot * 2 + 1) % neutral.size]
+    val slot1 = if (slot1Raw == slot0) neutral[(rot * 2 + 2) % neutral.size] else slot1Raw
+
     val base = remember(song) { coverColor(song) }
-    val hueShift = if (current >= 0) (current % 8) * 12f else 0f
+    val hueShift = if (current >= 0) (current % 8) * 12f else (rot % 8) * 12f
     val c1 by animateColorAsState(base, tween(900), label = "c1")
     val c2target = remember(base, hueShift) { shiftHue(base, 40f + hueShift) }
     val c2 by animateColorAsState(c2target, tween(1500), label = "c2")
+
+    if (showSearch) {
+        AlertDialog(
+            onDismissRequest = { showSearch = false },
+            title = { Text("Найти текст") },
+            text = {
+                TextField(
+                    value = searchText,
+                    onValueChange = { searchText = it },
+                    placeholder = { Text("Исполнитель и название") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    manualQuery = searchText
+                    showSearch = false
+                }) { Text("Искать") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSearch = false }) { Text("Отмена") }
+            }
+        )
+    }
 
     Box(
         Modifier
@@ -472,7 +593,7 @@ fun PlayerApp() {
                     .fillMaxHeight(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                CoverCard(song, Modifier.weight(1.1f).fillMaxWidth())
+                CoverCard(song, Modifier.weight(1.0f).fillMaxWidth())
                 PlayerCard(
                     song = song,
                     isPlaying = isPlaying,
@@ -483,21 +604,26 @@ fun PlayerApp() {
                     onNext = { player.seekToNextMediaItem() },
                     onSeek = { f -> if (duration > 0) player.seekTo((f * duration).toLong()) },
                     onAdd = { picker.launch(arrayOf("audio/*")) },
-                    modifier = Modifier.weight(0.9f).fillMaxWidth()
+                    onSearch = {
+                        searchText = if (song != null && song.artist != "Неизвестный исполнитель")
+                            "${song.artist} ${song.title}" else (song?.title ?: "")
+                        showSearch = true
+                    },
+                    modifier = Modifier.weight(1.0f).fillMaxWidth()
                 )
                 Row(
                     Modifier.weight(1f).fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Crossfade(slots[0], animationSpec = tween(500), label = "s0") { k ->
+                        Crossfade(slot0, animationSpec = tween(500), label = "s0") { k ->
                             WidgetView(k, bars, micGranted) {
                                 micLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
                         }
                     }
                     Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Crossfade(slots[1], animationSpec = tween(500), label = "s1") { k ->
+                        Crossfade(slot1, animationSpec = tween(500), label = "s1") { k ->
                             WidgetView(k, bars, micGranted) {
                                 micLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }

@@ -1,6 +1,8 @@
 package com.example.lyricsplayer
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -10,6 +12,7 @@ import android.media.audiofx.Visualizer
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -262,6 +265,8 @@ fun PlayerCard(
     onSeek: (Float) -> Unit,
     onAdd: () -> Unit,
     onSearch: () -> Unit,
+    onCopy: () -> Unit,
+    onScene: () -> Unit,
     modifier: Modifier
 ) {
     val frac = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
@@ -291,19 +296,25 @@ fun PlayerCard(
                 )
             }
             Text(
+                "📋",
+                fontSize = 15.sp,
+                modifier = Modifier.clickable { onCopy() }.padding(horizontal = 4.dp)
+            )
+            Text(
+                "🎬",
+                fontSize = 15.sp,
+                modifier = Modifier.clickable { onScene() }.padding(horizontal = 4.dp)
+            )
+            Text(
                 "🔍",
-                fontSize = 16.sp,
-                modifier = Modifier
-                    .clickable { onSearch() }
-                    .padding(start = 8.dp, end = 4.dp)
+                fontSize = 15.sp,
+                modifier = Modifier.clickable { onSearch() }.padding(horizontal = 4.dp)
             )
             Text(
                 "+",
                 color = Color.White,
                 fontSize = 26.sp,
-                modifier = Modifier
-                    .clickable { onAdd() }
-                    .padding(start = 8.dp)
+                modifier = Modifier.clickable { onAdd() }.padding(start = 6.dp)
             )
         }
 
@@ -359,6 +370,7 @@ fun PlayerCard(
 fun PlayerApp() {
     val context = LocalContext.current
     val player = remember { ExoPlayer.Builder(context).build() }
+    val prefs = remember { context.getSharedPreferences("scenes", Context.MODE_PRIVATE) }
 
     var songs by remember { mutableStateOf(listOf<Song>()) }
     var index by remember { mutableStateOf(0) }
@@ -377,12 +389,16 @@ fun PlayerApp() {
     var lyrics by remember { mutableStateOf(listOf<LrcLine>()) }
     var status by remember { mutableStateOf("Добавь песню, и здесь появится текст") }
     var matched by remember { mutableStateOf(listOf<WKind>()) }
-    var bannerKind by remember { mutableStateOf(WKind.CLOCK) }
+    var scene by remember { mutableStateOf(listOf<SLine>()) }
+    var bannerApp by remember { mutableStateOf("") }
+    var bannerText by remember { mutableStateOf("") }
     var bannerVisible by remember { mutableStateOf(false) }
     var bannerTick by remember { mutableStateOf(0) }
     var showSearch by remember { mutableStateOf(false) }
     var searchText by remember { mutableStateOf("") }
     var manualQuery by remember { mutableStateOf<String?>(null) }
+    var showScene by remember { mutableStateOf(false) }
+    var sceneText by remember { mutableStateOf("") }
 
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -476,10 +492,28 @@ fun PlayerApp() {
         lyrics = emptyList()
         matched = emptyList()
         manualQuery = null
+        scene = if (song != null) {
+            prefs.getString(song.uri.toString(), null)?.let { parseScene(it) } ?: emptyList()
+        } else emptyList()
         if (song != null) {
             status = "Ищу текст…"
-            val r = withContext(Dispatchers.IO) {
+            var r = withContext(Dispatchers.IO) {
                 fetchLyrics(song.title, song.artist, song.durationSec)
+            }
+            if (song.cover == null || r.isEmpty()) {
+                val q = if (song.artist != "Неизвестный исполнитель")
+                    "${song.artist} ${song.title}" else song.title
+                val hit = withContext(Dispatchers.IO) { searchItunes(q) }
+                if (hit != null && looksSame(song.title, hit.title)) {
+                    if (hit.cover != null && song.cover == null) {
+                        songs = songs.map {
+                            if (it.uri == song.uri) it.copy(cover = hit.cover) else it
+                        }
+                    }
+                    if (r.isEmpty()) {
+                        r = withContext(Dispatchers.IO) { fetchLyrics(hit.title, hit.artist, 0) }
+                    }
+                }
             }
             lyrics = r
             status = if (r.isEmpty()) "Текст не найден. Нажми 🔍 и введи название" else ""
@@ -490,7 +524,22 @@ fun PlayerApp() {
         val q = manualQuery
         if (q != null && q.isNotBlank()) {
             status = "Ищу текст…"
-            val r = withContext(Dispatchers.IO) { fetchLyrics(q, "", 0) }
+            val hit = withContext(Dispatchers.IO) { searchItunes(q) }
+            var r = withContext(Dispatchers.IO) {
+                fetchLyrics(hit?.title ?: q, hit?.artist ?: "", 0)
+            }
+            if (r.isEmpty()) r = withContext(Dispatchers.IO) { fetchLyrics(q, "", 0) }
+            if (hit != null && song != null) {
+                songs = songs.map {
+                    if (it.uri == song.uri) {
+                        it.copy(
+                            title = hit.title.ifBlank { it.title },
+                            artist = hit.artist.ifBlank { it.artist },
+                            cover = hit.cover ?: it.cover
+                        )
+                    } else it
+                }
+            }
             lyrics = r
             status = if (r.isEmpty()) "Текст не найден" else ""
         }
@@ -504,14 +553,28 @@ fun PlayerApp() {
         ((position - start).toFloat() / (end - start).coerceAtLeast(1)).coerceIn(0f, 1f)
     } else 0f
 
+    val sl: SLine? = if (scene.isNotEmpty() && current >= 0) {
+        scene.lastOrNull { it.i <= current }
+    } else null
+
     LaunchedEffect(current, lyrics) {
-        if (current >= 0) {
+        if (current >= 0 && scene.isEmpty()) {
             val found = detectWidgets(lyrics[current].text)
             matched = found
             if (found.isNotEmpty()) {
-                bannerKind = found.first()
+                bannerApp = found.first().bannerApp
+                bannerText = found.first().bannerText
                 bannerTick += 1
             }
+        }
+    }
+
+    LaunchedEffect(sl?.i, scene) {
+        val b = sl?.banner
+        if (b != null) {
+            bannerApp = b.app
+            bannerText = b.text
+            bannerTick += 1
         }
     }
 
@@ -523,7 +586,7 @@ fun PlayerApp() {
         }
     }
 
-    // Если в строке нет подходящих слов, виджеты сами сменяются каждые 5 секунд
+    // Если сцены нет и в строке нет подходящих слов, виджеты сменяются каждые 5 секунд
     val neutral = listOf(
         WKind.CLOCK, WKind.VIS, WKind.STOPWATCH, WKind.COMPASS, WKind.HEART, WKind.SPEED
     )
@@ -533,10 +596,27 @@ fun PlayerApp() {
         ?: if (matched.isNotEmpty()) WKind.VIS else neutral[(rot * 2 + 1) % neutral.size]
     val slot1 = if (slot1Raw == slot0) neutral[(rot * 2 + 2) % neutral.size] else slot1Raw
 
-    val base = remember(song) { coverColor(song) }
+    val w0: SWidget
+    val w1: SWidget
+    if (sl != null && sl.widgets.isNotEmpty()) {
+        w0 = sl.widgets[0]
+        w1 = sl.widgets.getOrNull(1) ?: kindWidget(WKind.VIS)
+    } else {
+        w0 = kindWidget(slot0)
+        w1 = kindWidget(slot1)
+    }
+
+    val sceneHue = sl?.hue
+    val base = remember(song, sceneHue) {
+        if (song?.cover == null && sceneHue != null) Color.hsv(sceneHue, 0.65f, 0.45f)
+        else coverColor(song)
+    }
     val hueShift = if (current >= 0) (current % 8) * 12f else (rot % 8) * 12f
     val c1 by animateColorAsState(base, tween(900), label = "c1")
-    val c2target = remember(base, hueShift) { shiftHue(base, 40f + hueShift) }
+    val c2target = remember(base, hueShift, sceneHue) {
+        if (sceneHue != null) Color.hsv((sceneHue + 50f) % 360f, 0.7f, 0.5f)
+        else shiftHue(base, 40f + hueShift)
+    }
     val c2 by animateColorAsState(c2target, tween(1500), label = "c2")
 
     if (showSearch) {
@@ -559,6 +639,42 @@ fun PlayerApp() {
             },
             dismissButton = {
                 TextButton(onClick = { showSearch = false }) { Text("Отмена") }
+            }
+        )
+    }
+
+    if (showScene) {
+        AlertDialog(
+            onDismissRequest = { showScene = false },
+            title = { Text("Вставить сцену") },
+            text = {
+                TextField(
+                    value = sceneText,
+                    onValueChange = { sceneText = it },
+                    placeholder = { Text("Вставь сюда ответ ИИ") },
+                    maxLines = 6
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val p = parseScene(sceneText)
+                    if (p == null || p.isEmpty()) {
+                        Toast.makeText(context, "Не получилось прочитать сцену", Toast.LENGTH_LONG).show()
+                    } else {
+                        scene = p
+                        if (song != null) {
+                            prefs.edit().putString(song.uri.toString(), sceneText).apply()
+                        }
+                        showScene = false
+                    }
+                }) { Text("Применить") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    scene = emptyList()
+                    if (song != null) prefs.edit().remove(song.uri.toString()).apply()
+                    showScene = false
+                }) { Text("Сбросить") }
             }
         )
     }
@@ -609,6 +725,31 @@ fun PlayerApp() {
                             "${song.artist} ${song.title}" else (song?.title ?: "")
                         showSearch = true
                     },
+                    onCopy = {
+                        if (lyrics.isEmpty()) {
+                            Toast.makeText(context, "Сначала найди текст песни", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val sb = StringBuilder(SCENE_PROMPT)
+                            sb.append("\n\nПесня: ")
+                                .append(song?.title ?: "")
+                                .append(" - ")
+                                .append(song?.artist ?: "")
+                                .append("\n")
+                            lyrics.forEachIndexed { i, l ->
+                                sb.append(i).append("|").append(fmt(l.timeMs))
+                                    .append("|").append(l.text).append("\n")
+                            }
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("lyrics", sb.toString()))
+                            Toast.makeText(
+                                context, "Скопировано. Вставь в чат с ИИ", Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    },
+                    onScene = {
+                        sceneText = ""
+                        showScene = true
+                    },
                     modifier = Modifier.weight(1.0f).fillMaxWidth()
                 )
                 Row(
@@ -616,15 +757,15 @@ fun PlayerApp() {
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Crossfade(slot0, animationSpec = tween(500), label = "s0") { k ->
-                            WidgetView(k, bars, micGranted) {
+                        Crossfade(w0, animationSpec = tween(500), label = "s0") { k ->
+                            SceneWidget(k, bars, micGranted) {
                                 micLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
                         }
                     }
                     Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Crossfade(slot1, animationSpec = tween(500), label = "s1") { k ->
-                            WidgetView(k, bars, micGranted) {
+                        Crossfade(w1, animationSpec = tween(500), label = "s1") { k ->
+                            SceneWidget(k, bars, micGranted) {
                                 micLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
                         }
@@ -651,7 +792,7 @@ fun PlayerApp() {
                 .align(Alignment.TopEnd)
                 .padding(top = 12.dp, end = 20.dp)
         ) {
-            Banner(bannerKind.bannerApp, bannerKind.bannerText)
+            Banner(bannerApp, bannerText)
         }
     }
 }

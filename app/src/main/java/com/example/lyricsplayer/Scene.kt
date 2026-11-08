@@ -3,6 +3,11 @@ package com.example.lyricsplayer
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -24,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,6 +37,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
@@ -69,8 +77,8 @@ val SCENE_PROMPT = """
 Верни ТОЛЬКО JSON без пояснений в таком виде:
 {"lines":[{"i":0,"bg":280,"w":[{"t":"counter","title":"ВНИМАНИЕ","sub":"взглядов в секунду","emoji":"👁","from":0,"to":11,"unit":"","color":"#FF6B6B"},{"t":"ring","title":"КРУГ","sub":"смотрят на вас","from":0,"to":100,"unit":"%","color":"#0A84FF"}],"banner":{"app":"НАЙТИ","text":"Рядом 12 человек смотрят на вас"}}]}
 Поле i - номер строки, с которой сцена действует (до следующего i). bg - оттенок фона 0-360. banner необязателен.
-Типы виджетов t: counter (число от from до to, рядом unit), bar (полоса 0-100), ring (кольцо 0-100), emoji (крупный emoji и подпись sub), list (items до 4 коротких строк), clock, visualizer, stopwatch, compass, heart.
-В w ровно 2 виджета. Заголовки, подписи и уведомления короткие, на русском, придумывай их по смыслу строк.
+Типы виджетов t: counter (число от from до to, рядом unit), bar (полоса 0-100), ring (кольцо 0-100), spark (число и растущий график от from до to), wheel (крутящееся колесо выбора), grid (сетка из 18 точек, to - сколько закрашено 0-18), map (карта с границей и точкой), emoji (крупный emoji и подпись sub), list (items до 4 коротких строк), clock, visualizer, stopwatch, compass, heart.
+В w ровно 2 виджета, разных по типу. Заголовки, подписи и уведомления короткие, на русском, придумывай их по смыслу строк.
 """.trimIndent()
 
 private fun parseCol(s: String?): Color {
@@ -182,6 +190,10 @@ fun SceneWidget(w: SWidget, bars: FloatArray, micGranted: Boolean, onMic: () -> 
         "bar" -> WidgetCard(w.title, w.sub) { BarWidget(w) }
         "ring" -> WidgetCard(w.title, w.sub) { RingWidget(w) }
         "list" -> WidgetCard(w.title, w.sub) { ListWidget(w) }
+        "spark" -> WidgetCard(w.title, w.sub) { SparkWidget(w) }
+        "wheel" -> WidgetCard(w.title, w.sub) { WheelWidget(w) }
+        "grid" -> WidgetCard(w.title, w.sub) { GridWidget(w) }
+        "map" -> WidgetCard(w.title, w.sub) { MapWidget() }
         else -> WidgetCard(w.title, "") {
             EmojiWidget(w.emoji.ifBlank { "✨" }, w.sub, Color.White.copy(alpha = 0.8f))
         }
@@ -293,5 +305,134 @@ fun ListWidget(w: SWidget) {
                 Text(t, color = Color.White, fontSize = 12.sp, maxLines = 1)
             }
         }
+    }
+}
+
+@Composable
+fun SparkWidget(w: SWidget) {
+    val a = remember(w) { Animatable(w.from) }
+    LaunchedEffect(w) { a.animateTo(w.to, tween(2500)) }
+    val range = (w.to - w.from).let { if (it == 0f) 1f else it }
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            if (w.emoji.isNotBlank()) {
+                Text(w.emoji, fontSize = 24.sp)
+                Spacer(Modifier.width(6.dp))
+            }
+            Text("${a.value.toInt()}", color = Color.White, fontSize = 38.sp)
+            if (w.unit.isNotBlank()) {
+                Spacer(Modifier.width(6.dp))
+                Text(w.unit, color = w.color, fontSize = 12.sp)
+            }
+        }
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+        ) {
+            val frac = ((a.value - w.from) / range).coerceIn(0f, 1f)
+            val p = Path()
+            val n = 24
+            for (i in 0..n) {
+                val t = i.toFloat() / n
+                val x = size.width * t
+                val y = size.height * (1f - t * t * frac)
+                if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
+            }
+            drawPath(p, w.color, style = Stroke(width = 5f, cap = StrokeCap.Round))
+        }
+    }
+}
+
+@Composable
+fun WheelWidget(w: SWidget) {
+    val rot = remember(w) { Animatable(0f) }
+    LaunchedEffect(w) { rot.animateTo(1080f, tween(3500, easing = FastOutSlowInEasing)) }
+    Canvas(Modifier.fillMaxSize()) {
+        val c = Offset(size.width / 2, size.height / 2 + 6f)
+        val r = minOf(size.width, size.height) / 2 * 0.8f
+        val cols = listOf(
+            Color(0xFFFF453A), Color(0xFFFF9F0A), Color(0xFFFFD60A),
+            Color(0xFF34C759), Color(0xFF0A84FF), Color(0xFFBF5AF2)
+        )
+        val n = cols.size
+        for (i in 0 until n) {
+            drawArc(
+                color = cols[i],
+                startAngle = rot.value + i * 360f / n,
+                sweepAngle = 360f / n,
+                useCenter = true,
+                topLeft = Offset(c.x - r, c.y - r),
+                size = Size(2 * r, 2 * r)
+            )
+        }
+        val p = Path().apply {
+            moveTo(c.x, c.y - r + 4f)
+            lineTo(c.x - 10f, c.y - r - 12f)
+            lineTo(c.x + 10f, c.y - r - 12f)
+            close()
+        }
+        drawPath(p, Color.White)
+    }
+}
+
+@Composable
+fun GridWidget(w: SWidget) {
+    val a = remember(w) { Animatable(0f) }
+    LaunchedEffect(w) { a.animateTo(1f, tween(2000)) }
+    val total = 18
+    val on = (w.to.toInt().coerceIn(0, total) * a.value).toInt()
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
+        for (row in 0 until 3) {
+            Row(
+                Modifier.padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                for (col in 0 until 6) {
+                    val idx = row * 6 + col
+                    Box(
+                        Modifier
+                            .size(13.dp)
+                            .clip(CircleShape)
+                            .background(if (idx < on) w.color else Color.White.copy(alpha = 0.15f))
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("$on из $total", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
+    }
+}
+
+@Composable
+fun MapWidget() {
+    val t = rememberInfiniteTransition(label = "map")
+    val pulse by t.animateFloat(
+        0.6f, 1.4f,
+        infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "pulse"
+    )
+    Canvas(
+        Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(10.dp))
+    ) {
+        drawRect(Color(0xFF1E3A2A))
+        drawLine(
+            Color(0xFF2F5D3F),
+            Offset(0f, size.height * 0.7f),
+            Offset(size.width, size.height * 0.25f),
+            strokeWidth = 14f
+        )
+        drawLine(
+            Color(0xFFFFD60A),
+            Offset(size.width * 0.15f, size.height),
+            Offset(size.width * 0.6f, 0f),
+            strokeWidth = 4f,
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
+        )
+        val me = Offset(size.width * 0.38f, size.height * 0.52f)
+        drawCircle(Color(0xFF0A84FF).copy(alpha = 0.3f), 18f * pulse, me)
+        drawCircle(Color(0xFF0A84FF), 7f, me)
     }
 }
